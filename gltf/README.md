@@ -24,7 +24,7 @@ For better compression, you can use `-cc` option which applies additional compre
 
 gltfpack can also compress textures using Basis Universal format stored in a KTX2 container (`-tc` flag, requires support for `KHR_texture_basisu`) or using WebP format (`-tw` flag, requires support for `EXT_texture_webp`).
 
-When working with glTF files that contain point clouds, gltfpack automatically processes the point cloud data to reduce the download size to the extent possible. In addition to aforementioned compression options (either `-c` or `-cc` are recommended), gltfpack can also prune point clouds to provide a more uniform density when `-si` option is used.
+When working with glTF files that contain point clouds, gltfpack automatically processes the point cloud data to reduce the download size to the extent possible. In addition to aforementioned compression options (either `-c` or `-cc` are recommended), gltfpack can also prune point clouds to provide a more uniform density when `-si` option is used. Both indexed and non-indexed `POINTS` primitives are supported; indexed points retain their index buffer and point mode through quantization, vertex reordering and meshopt compression, with the point count and bounding box preserved.
 
 ## Decompression
 

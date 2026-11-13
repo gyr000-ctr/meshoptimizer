@@ -17,3 +17,8 @@ compile_commands.json
 /data/
 /*.log
 /perf.data*
+
+# Generated indexed-points test assets and outputs
+/gltf/tests/data/
+/gltf/tests/out/
+/gltf/tests/__pycache__/

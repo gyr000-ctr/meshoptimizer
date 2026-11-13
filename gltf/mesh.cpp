@@ -484,7 +484,7 @@ void mergeMeshes(std::vector<Mesh>& meshes, const Settings& settings)
 	{
 		Mesh& target = meshes[i];
 
-		if (target.streams.empty())
+		if (target.streams.empty() || target.streams[0].data.empty())
 			continue;
 
 		size_t target_vertices = target.streams[0].data.size();
@@ -543,7 +543,8 @@ void filterEmptyMeshes(std::vector<Mesh>& meshes)
 		if (mesh.streams[0].data.empty())
 			continue;
 
-		if (mesh.type != cgltf_primitive_type_points && mesh.indices.empty())
+		// non-point primitives must retain an index buffer; indexed points with an empty index buffer draw nothing
+		if (mesh.indices.empty() && mesh.type != cgltf_primitive_type_points)
 			continue;
 
 		// the following code is roughly equivalent to meshes[write] = std::move(mesh)
@@ -1271,7 +1272,68 @@ static void simplifyPointMesh(Mesh& mesh, float threshold)
 
 	const Stream* colors = getStream(mesh, cgltf_attribute_type_color);
 
-	size_t vertex_count = mesh.streams[0].data.size();
+	size_t vertex_count = positions->data.size();
+
+	if (!mesh.indices.empty())
+	{
+		// run point simplification on the vertices referenced by the index buffer, preserving the indexed output mode
+		size_t index_count = mesh.indices.size();
+		size_t target_index_count = size_t(double(index_count) * threshold);
+
+		std::vector<Attr> indexed_positions(index_count);
+		std::vector<Attr> indexed_colors;
+		const Attr* color_data = NULL;
+
+		for (size_t i = 0; i < index_count; ++i)
+			indexed_positions[i] = positions->data[mesh.indices[i]];
+
+		if (colors)
+		{
+			indexed_colors.resize(index_count);
+			for (size_t i = 0; i < index_count; ++i)
+				indexed_colors[i] = colors->data[mesh.indices[i]];
+			color_data = indexed_colors.data();
+		}
+
+		std::vector<unsigned int> kept(target_index_count);
+		if (target_index_count)
+			kept.resize(meshopt_simplifyPoints(&kept[0], indexed_positions[0].f, index_count, sizeof(Attr), color_data ? color_data[0].f : NULL, sizeof(Attr), 1, target_index_count));
+
+		// compact the vertex buffer to the vertices still referenced by the surviving points
+		std::vector<unsigned int> remap(vertex_count, ~0u);
+		size_t unique_count = 0;
+
+		// kept[i] is an index into the indexed point array built above
+		for (size_t i = 0; i < kept.size(); ++i)
+		{
+			unsigned int old_index = mesh.indices[kept[i]];
+
+			if (remap[old_index] == ~0u)
+				remap[old_index] = unsigned(unique_count++);
+		}
+
+		for (size_t i = 0; i < kept.size(); ++i)
+			kept[i] = mesh.indices[kept[i]];
+
+		mesh.indices.resize(kept.size());
+		for (size_t i = 0; i < kept.size(); ++i)
+			mesh.indices[i] = remap[kept[i]];
+
+		for (size_t i = 0; i < mesh.streams.size(); ++i)
+		{
+			std::vector<Attr>& data = mesh.streams[i].data;
+			assert(data.size() == vertex_count);
+
+			size_t write = 0;
+			for (size_t j = 0; j < vertex_count; ++j)
+				if (remap[j] != ~0u)
+					data[write++] = data[j];
+
+			data.resize(unique_count);
+		}
+
+		return;
+	}
 
 	size_t target_vertex_count = size_t(double(vertex_count) * threshold);
 
@@ -1308,7 +1370,7 @@ static void sortPointMesh(Mesh& mesh)
 	if (getStream(mesh, cgltf_attribute_type_custom))
 		return;
 
-	size_t vertex_count = mesh.streams[0].data.size();
+	size_t vertex_count = positions->data.size();
 
 	std::vector<unsigned int> remap(vertex_count);
 	meshopt_spatialSortRemap(&remap[0], positions->data[0].f, vertex_count, sizeof(Attr));
@@ -1319,6 +1381,10 @@ static void sortPointMesh(Mesh& mesh)
 
 		meshopt_remapVertexBuffer(&mesh.streams[i].data[0], &mesh.streams[i].data[0], vertex_count, sizeof(Attr), &remap[0]);
 	}
+
+	// indexed points: keep the index buffer valid after the vertex reorder
+	if (!mesh.indices.empty())
+		meshopt_remapIndexBuffer(&mesh.indices[0], &mesh.indices[0], mesh.indices.size(), &remap[0]);
 }
 
 void processMesh(Mesh& mesh, const Settings& settings)
@@ -1326,7 +1392,6 @@ void processMesh(Mesh& mesh, const Settings& settings)
 	switch (mesh.type)
 	{
 	case cgltf_primitive_type_points:
-		assert(mesh.indices.empty());
 		simplifyPointMesh(mesh, settings.simplify_ratio);
 		sortPointMesh(mesh);
 		break;

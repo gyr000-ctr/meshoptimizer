@@ -175,17 +175,39 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 		{
 			const cgltf_primitive& primitive = mesh.primitives[pi];
 
-			if (primitive.type == cgltf_primitive_type_points && primitive.indices)
-			{
-				fprintf(stderr, "Warning: ignoring primitive %d of mesh %d because indexed points are not supported\n", int(pi), int(mi));
-				continue;
-			}
-
 			const cgltf_accessor* positions = cgltf_find_accessor(&primitive, cgltf_attribute_type_position, 0);
 
 			if (!positions)
 			{
 				fprintf(stderr, "Warning: ignoring primitive %d of mesh %d because it has no position data\n", int(pi), int(mi));
+				continue;
+			}
+
+			size_t vertex_count = positions->count;
+
+			if (primitive.indices)
+			{
+				// glTF requires indices to reference valid vertices; reject primitives with out-of-range indices instead of
+				// reading out of bounds downstream (assertions are disabled in release builds)
+				bool invalid = false;
+
+				for (size_t i = 0; i < primitive.indices->count; ++i)
+					if (cgltf_accessor_read_index(primitive.indices, i) >= vertex_count)
+					{
+						invalid = true;
+						break;
+					}
+
+				if (invalid)
+				{
+					fprintf(stderr, "Warning: ignoring primitive %d of mesh %d because it has indices referencing vertices outside of the position accessor\n", int(pi), int(mi));
+					continue;
+				}
+			}
+
+			if (vertex_count == 0)
+			{
+				fprintf(stderr, "Warning: ignoring primitive %d of mesh %d because it has no vertices\n", int(pi), int(mi));
 				continue;
 			}
 
@@ -198,8 +220,6 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 			result.type = primitive.type;
 
 			result.streams.reserve(primitive.attributes_count);
-
-			size_t vertex_count = positions->count;
 
 			if (primitive.indices)
 			{
@@ -224,7 +244,8 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 			std::vector<unsigned int> sparse;
 
 			// if the index data is very sparse, switch to deindexing on the fly to avoid the excessive cost of reading large accessors
-			if (!result.indices.empty() && result.indices.size() < vertex_count / 2)
+			// note: point primitives keep their index buffer since indexed points are a separate output mode
+			if (primitive.type != cgltf_primitive_type_points && !result.indices.empty() && result.indices.size() < vertex_count / 2)
 			{
 				sparse = result.indices;
 
@@ -232,6 +253,8 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 				for (size_t i = 0; i < result.indices.size(); ++i)
 					result.indices[i] = unsigned(i);
 			}
+
+			bool valid = true;
 
 			for (size_t ai = 0; ai < primitive.attributes_count; ++ai)
 			{
@@ -263,6 +286,14 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 				else
 					readAccessor(s.data, attr.data, sparse);
 
+				if (s.data.size() != vertex_count)
+				{
+					fprintf(stderr, "Warning: ignoring primitive %d of mesh %d because attribute %s has %d elements but position has %d\n",
+					    int(pi), int(mi), attr.name, int(s.data.size()), int(vertex_count));
+					valid = false;
+					break;
+				}
+
 				if (attr.type == cgltf_attribute_type_color && attr.data->type == cgltf_type_vec3)
 				{
 					for (size_t i = 0; i < s.data.size(); ++i)
@@ -270,7 +301,7 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 				}
 			}
 
-			for (size_t ti = 0; ti < primitive.targets_count; ++ti)
+			for (size_t ti = 0; valid && ti < primitive.targets_count; ++ti)
 			{
 				const cgltf_morph_target& target = primitive.targets[ti];
 
@@ -295,7 +326,21 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 						readAccessor(s.data, attr.data);
 					else
 						readAccessor(s.data, attr.data, sparse);
+
+					if (s.data.size() != vertex_count)
+					{
+						fprintf(stderr, "Warning: ignoring primitive %d of mesh %d because morph target attribute %s has %d elements but position has %d\n",
+						    int(pi), int(mi), attr.name, int(s.data.size()), int(vertex_count));
+						valid = false;
+						break;
+					}
 				}
+			}
+
+			if (!valid)
+			{
+				meshes.pop_back();
+				continue;
 			}
 
 			result.targets = primitive.targets_count;
