@@ -214,6 +214,50 @@ static void resampleKeyframes(std::vector<Attr>& data, const std::vector<float>&
 	}
 }
 
+// KHR_animation_pointer tracks use component-major storage: one Attr per component (value in f[0]),
+// `frames` keyframes laid out as frame0c0, frame0c1, ..., frame1c0, ...
+static void resamplePointerKeyframes(std::vector<Attr>& data, const std::vector<float>& input, const std::vector<Attr>& output, cgltf_interpolation_type interpolation, size_t components, int frames, float mint, int freq)
+{
+	size_t cursor = 0;
+
+	for (int i = 0; i < frames; ++i)
+	{
+		float time = mint + float(i) / freq;
+
+		while (cursor + 1 < input.size())
+		{
+			if (input[cursor + 1] > time)
+				break;
+			cursor++;
+		}
+
+		for (size_t j = 0; j < components; ++j)
+		{
+			Attr value = {};
+
+			if (cursor + 1 < input.size())
+			{
+				float range = input[cursor + 1] - input[cursor];
+				float t = (range == 0.f) ? 0.f : std::max(0.f, std::min(1.f, (time - input[cursor]) / range));
+
+				float l = output[(cursor + 0) * components + j].f[0];
+				float r = output[(cursor + 1) * components + j].f[0];
+
+				if (interpolation == cgltf_interpolation_type_step)
+					value.f[0] = l;
+				else
+					value.f[0] = l + (r - l) * t; // cubic spline is converted to linear during processing
+			}
+			else
+			{
+				value.f[0] = output[cursor * components + j].f[0];
+			}
+
+			data.push_back(value);
+		}
+	}
+}
+
 static float getMaxDelta(const std::vector<Attr>& data, cgltf_animation_path_type type, const Attr* value, size_t components)
 {
 	assert(data.size() % components == 0);
@@ -317,7 +361,11 @@ void processAnimation(Animation& animation, const Settings& settings)
 		if (settings.anim_freq)
 		{
 			std::vector<Attr> result;
-			resampleKeyframes(result, track.time, track.data, track.path, track.interpolation, track.components, animation.frames, animation.start, settings.anim_freq);
+
+			if (track.node)
+				resampleKeyframes(result, track.time, track.data, track.path, track.interpolation, track.components, animation.frames, animation.start, settings.anim_freq);
+			else
+				resamplePointerKeyframes(result, track.time, track.data, track.interpolation, track.components, animation.frames, animation.start, settings.anim_freq);
 
 			track.time.clear();
 			track.data.swap(result);
@@ -326,6 +374,11 @@ void processAnimation(Animation& animation, const Settings& settings)
 
 		// getMaxDelta assumes linear/step interpolation for now
 		if (track.interpolation == cgltf_interpolation_type_cubic_spline)
+			continue;
+
+		// KHR_animation_pointer tracks target material/light properties; constant-fold logic is node-transform specific
+		// (getMaxDelta's base-value indexing assumes per-frame Attr layout) and must not collapse these tracks
+		if (!track.node)
 			continue;
 
 		float tolerance = getDeltaTolerance(track.path);
@@ -347,10 +400,15 @@ void processAnimation(Animation& animation, const Settings& settings)
 			track.data.resize(track.components);
 
 			// track.dummy is true iff track redundantly sets up the value to be equal to default node transform
-			base.resize(track.components);
-			getBaseTransform(&base[0], track.components, track.path, track.node);
+			// KHR_animation_pointer tracks never target node transforms, so they can't be dummy
+			if (track.node)
+			{
+				// track.dummy is true iff track redundantly sets up the value to be equal to default node transform
+				base.resize(track.components);
+				getBaseTransform(&base[0], track.components, track.path, track.node);
 
-			track.dummy = getMaxDelta(track.data, track.path, &base[0], track.components) <= tolerance;
+				track.dummy = getMaxDelta(track.data, track.path, &base[0], track.components) <= tolerance;
+			}
 		}
 	}
 }

@@ -416,7 +416,16 @@ static void parseMeshNodesGltf(cgltf_data* data, std::vector<Mesh>& meshes, cons
 	}
 }
 
-static void parseAnimationsGltf(cgltf_data* data, std::vector<Animation>& animations)
+static bool hasAnimationPointer(const cgltf_animation_channel& channel)
+{
+	for (size_t i = 0; i < channel.extensions_count; ++i)
+		if (strcmp(channel.extensions[i].name, "KHR_animation_pointer") == 0)
+			return true;
+
+	return false;
+}
+
+static void parseAnimationsGltf(cgltf_data* data, std::vector<Animation>& animations, const char** error)
 {
 	animations.reserve(data->animations_count);
 
@@ -435,10 +444,18 @@ static void parseAnimationsGltf(cgltf_data* data, std::vector<Animation>& animat
 		{
 			const cgltf_animation_channel& channel = animation.channels[j];
 
-			if (!channel.target_node)
+			bool is_pointer = hasAnimationPointer(channel);
+
+			if (!is_pointer && !channel.target_node)
 			{
 				fprintf(stderr, "Warning: ignoring channel %d of animation %d (%s) because it has no target node\n", int(j), int(i), animation.name ? animation.name : "");
 				continue;
+			}
+
+			if (!channel.sampler)
+			{
+				*error = "animation channel has no sampler";
+				return;
 			}
 
 			result.tracks.push_back(Track());
@@ -447,12 +464,56 @@ static void parseAnimationsGltf(cgltf_data* data, std::vector<Animation>& animat
 			track.node = channel.target_node;
 			track.path = channel.target_path;
 
-			track.components = (channel.target_path == cgltf_animation_path_type_weights) ? track.node->mesh->primitives[0].targets_count : 1;
+			if (is_pointer)
+			{
+				if (channel.sampler->interpolation == cgltf_interpolation_type_cubic_spline)
+				{
+					fprintf(stderr, "Error: channel %d of animation %d (%s): CUBICSPLINE interpolation is not supported for KHR_animation_pointer channels\n", int(j), int(i), animation.name ? animation.name : "");
+					*error = "CUBICSPLINE interpolation is not supported for KHR_animation_pointer channels";
+					return;
+				}
+
+				size_t accessor_components = cgltf_num_components(channel.sampler->output->type);
+
+				const char* pointer_error = parseAnimationPointer(channel, data, accessor_components, track.target, track.pointer);
+				if (pointer_error)
+				{
+					fprintf(stderr, "Error: channel %d of animation %d (%s): %s\n", int(j), int(i), animation.name ? animation.name : "", pointer_error);
+					*error = pointer_error;
+					return;
+				}
+
+				track.components = track.target.components;
+				// pointer tracks don't target node transforms; keep path as translation so generic processing treats values as plain linear data
+				track.path = cgltf_animation_path_type_translation;
+			}
+			else
+			{
+				track.components = (channel.target_path == cgltf_animation_path_type_weights) ? track.node->mesh->primitives[0].targets_count : 1;
+			}
 
 			track.interpolation = channel.sampler->interpolation;
 
 			readAccessor(track.time, channel.sampler->input);
 			readAccessor(track.data, channel.sampler->output);
+
+			if (is_pointer)
+			{
+				// readAccessor packs each keyframe into one Attr; the rest of the pipeline uses
+				// component-major storage (one Attr per component, f[0] only), so convert here
+				std::vector<Attr> frames;
+				frames.swap(track.data);
+
+				track.data.reserve(frames.size() * track.components);
+
+				for (size_t f = 0; f < frames.size(); ++f)
+					for (size_t c = 0; c < track.components; ++c)
+					{
+						Attr value = {};
+						value.f[0] = frames[f].f[c];
+						track.data.push_back(value);
+					}
+			}
 		}
 
 		if (result.tracks.empty())
@@ -652,7 +713,13 @@ static cgltf_data* parseGltf(cgltf_data* data, cgltf_result result, std::vector<
 
 	parseMeshesGltf(data, meshes, mesh_remap);
 	parseMeshNodesGltf(data, meshes, mesh_remap);
-	parseAnimationsGltf(data, animations);
+	parseAnimationsGltf(data, animations, error);
+
+	if (*error)
+	{
+		cgltf_free(data);
+		return NULL;
+	}
 
 	bool free_bin = freeUnusedBuffers(data);
 

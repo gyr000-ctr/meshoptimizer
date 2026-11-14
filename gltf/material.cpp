@@ -365,7 +365,7 @@ static bool areMaterialsEqual(const cgltf_material& lhs, const cgltf_material& r
 	return true;
 }
 
-void mergeMeshMaterials(cgltf_data* data, std::vector<Mesh>& meshes, const Settings& settings)
+void mergeMeshMaterials(cgltf_data* data, std::vector<Mesh>& meshes, std::vector<Animation>& animations, const Settings& settings)
 {
 	std::vector<cgltf_material*> material_remap(data->materials_count);
 
@@ -390,6 +390,9 @@ void mergeMeshMaterials(cgltf_data* data, std::vector<Mesh>& meshes, const Setti
 			}
 		}
 	}
+
+	// KHR_animation_pointer targets reference materials by index; retarget them before the source materials become unreachable
+	remapAnimationPointerMaterials(animations, material_remap.data(), data);
 
 	for (size_t i = 0; i < meshes.size(); ++i)
 	{

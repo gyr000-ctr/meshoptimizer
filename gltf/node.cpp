@@ -40,6 +40,10 @@ void markAnimated(cgltf_data* data, std::vector<NodeInfo>& nodes, const std::vec
 		{
 			const Track& track = animation.tracks[j];
 
+			// KHR_animation_pointer tracks target materials/lights instead of nodes
+			if (!track.node)
+				continue;
+
 			// mark nodes that have animation tracks that change their base transform as animated
 			if (!track.dummy)
 			{
@@ -83,6 +87,10 @@ void markNeededNodes(cgltf_data* data, std::vector<NodeInfo>& nodes, const std::
 		for (size_t j = 0; j < animation.tracks.size(); ++j)
 		{
 			const Track& track = animation.tracks[j];
+
+			// KHR_animation_pointer tracks target materials/lights instead of nodes
+			if (!track.node)
+				continue;
 
 			if (settings.anim_const || !track.dummy)
 			{

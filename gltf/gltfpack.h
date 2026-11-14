@@ -75,6 +75,22 @@ struct Mesh
 	float quality;
 };
 
+enum PointerTargetKind
+{
+	PointerTarget_None,
+	PointerTarget_Material,
+	PointerTarget_Light,
+};
+
+struct PointerTarget
+{
+	PointerTargetKind kind;
+	size_t index; // index into cgltf_data::materials or cgltf_data::lights
+
+	std::vector<std::string> suffix; // decoded JSON pointer tokens after the root object token
+	size_t components;               // number of animated components (1-4)
+};
+
 struct Track
 {
 	cgltf_node* node;
@@ -89,6 +105,10 @@ struct Track
 
 	std::vector<float> time; // empty for resampled or constant animations
 	std::vector<Attr> data;
+
+	// KHR_animation_pointer: when pointer is non-empty, node is NULL and the channel target is defined by the JSON pointer instead
+	std::string pointer; // original JSON pointer URI
+	PointerTarget target;
 };
 
 struct Animation
@@ -330,6 +350,12 @@ cgltf_data* parseGlb(const void* buffer, size_t size, std::vector<Mesh>& meshes,
 
 bool areExtrasEqual(const cgltf_extras& lhs, const cgltf_extras& rhs);
 
+// KHR_animation_pointer
+const char* parseAnimationPointer(const cgltf_animation_channel& channel, cgltf_data* data, size_t accessor_components, PointerTarget& target, std::string& pointer);
+const char* validateAnimationPointers(const std::vector<Animation>& animations, const std::vector<MaterialInfo>& materials);
+void remapAnimationPointerMaterials(std::vector<Animation>& animations, cgltf_material* const* material_remap, cgltf_data* data);
+std::string rewriteAnimationPointer(const PointerTarget& target, const std::vector<MaterialInfo>& materials);
+
 void processAnimation(Animation& animation, const Settings& settings);
 void processMesh(Mesh& mesh, const Settings& settings);
 void processSplatMesh(Mesh& mesh, const Settings& settings);
@@ -347,7 +373,7 @@ void filterStreams(Mesh& mesh, const MaterialInfo& mi);
 void generateTangents(Mesh& mesh);
 void generateNormals(Mesh& mesh, float crease_angle);
 
-void mergeMeshMaterials(cgltf_data* data, std::vector<Mesh>& meshes, const Settings& settings);
+void mergeMeshMaterials(cgltf_data* data, std::vector<Mesh>& meshes, std::vector<Animation>& animations, const Settings& settings);
 void markNeededMaterials(cgltf_data* data, std::vector<MaterialInfo>& materials, const std::vector<Mesh>& meshes, const Settings& settings);
 
 void mergeTextures(cgltf_data* data, std::vector<TextureInfo>& textures);
@@ -390,6 +416,7 @@ StreamFormat writeVertexStream(std::string& bin, const Stream& stream, const Qua
 StreamFormat writeIndexStream(std::string& bin, const std::vector<unsigned int>& stream);
 StreamFormat writeTimeStream(std::string& bin, const std::vector<float>& data);
 StreamFormat writeKeyframeStream(std::string& bin, cgltf_animation_path_type type, const std::vector<Attr>& data, const Settings& settings, bool has_tangents = false);
+StreamFormat writeKeyframePointerStream(std::string& bin, size_t components, const std::vector<Attr>& data, const Settings& settings);
 StreamFormat writeSplatStream(std::string& bin, const Stream& stream, const Settings& settings);
 
 void compressVertexStream(std::string& bin, const std::string& data, size_t count, size_t stride, int level);
@@ -425,7 +452,7 @@ void writeMeshNode(std::string& json, size_t mesh_offset, cgltf_node* node, cglt
 void writeMeshNodeInstanced(std::string& json, size_t mesh_offset, size_t accr_offset, bool has_color);
 void writeSkin(std::string& json, const cgltf_skin& skin, size_t matrix_accr, const std::vector<NodeInfo>& nodes, cgltf_data* data);
 void writeNode(std::string& json, const cgltf_node& node, const std::vector<NodeInfo>& nodes, cgltf_data* data);
-void writeAnimation(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Animation& animation, size_t i, cgltf_data* data, const std::vector<NodeInfo>& nodes, const Settings& settings);
+void writeAnimation(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Animation& animation, size_t i, cgltf_data* data, const std::vector<NodeInfo>& nodes, const std::vector<MaterialInfo>& materials, const Settings& settings);
 void writeCamera(std::string& json, const cgltf_camera& camera);
 void writeLight(std::string& json, const cgltf_light& light);
 void writeArray(std::string& json, const char* name, const std::string& contents);

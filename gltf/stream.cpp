@@ -870,6 +870,39 @@ StreamFormat writeKeyframeStream(std::string& bin, cgltf_animation_path_type typ
 	}
 }
 
+StreamFormat writeKeyframePointerStream(std::string& bin, size_t components, const std::vector<Attr>& data, const Settings& settings)
+{
+	assert(components >= 1 && components <= 4);
+	assert(data.size() % components == 0);
+
+	size_t stride = sizeof(float) * components;
+	size_t offset = bin.size();
+
+	// data is component-major: each keyframe is a run of `components` Attr values using f[0]
+	for (size_t i = 0; i < data.size(); i += components)
+	{
+		float v[4] = {};
+		for (size_t j = 0; j < components; ++j)
+			v[j] = data[i + j].f[0];
+		bin.append(reinterpret_cast<const char*>(v), stride);
+	}
+
+	size_t frame_count = data.size() / components;
+
+	StreamFormat::Filter filter = StreamFormat::Filter_None;
+
+	// pointer tracks always stay 32-bit floats; when compressing, use exponential filtering to keep relative error small
+	if (settings.compress)
+	{
+		filter = StreamFormat::Filter_Exp;
+		meshopt_encodeFilterExp(&bin[offset], frame_count, stride, settings.trn_bits, reinterpret_cast<const float*>(&bin[offset]), meshopt_EncodeExpSeparate);
+	}
+
+	cgltf_type type = components == 1 ? cgltf_type_scalar : cgltf_type(components == 2 ? cgltf_type_vec2 : (components == 3 ? cgltf_type_vec3 : cgltf_type_vec4));
+	StreamFormat format = {type, cgltf_component_type_r_32f, false, stride, filter};
+	return format;
+}
+
 void compressVertexStream(std::string& bin, const std::string& data, size_t count, size_t stride, int level)
 {
 	assert(data.size() == count * stride);

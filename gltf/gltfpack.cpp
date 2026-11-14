@@ -374,7 +374,7 @@ static bool sameQuantization(const QuantizationTexture& lhs, const QuantizationT
 	       lhs.bits == rhs.bits && lhs.normalized == rhs.normalized;
 }
 
-static size_t process(cgltf_data* data, const char* input_path, const char* output_path, const char* report_path, std::vector<Mesh>& meshes, std::vector<Animation>& animations, const Settings& settings, std::string& json, std::string& bin, std::string& fallback, size_t& fallback_size, const char* meshopt_ext)
+static const char* process(cgltf_data* data, const char* input_path, const char* output_path, const char* report_path, std::vector<Mesh>& meshes, std::vector<Animation>& animations, const Settings& settings, std::string& json, std::string& bin, std::string& fallback, size_t& fallback_size, const char* meshopt_ext, size_t& bufferspec_pos)
 {
 	if (settings.verbose)
 	{
@@ -391,7 +391,7 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 	markScenes(data, nodes);
 	markAnimated(data, nodes, animations);
 
-	mergeMeshMaterials(data, meshes, settings);
+	mergeMeshMaterials(data, meshes, animations, settings);
 	if (settings.mesh_dedup)
 		dedupMeshes(meshes, settings);
 
@@ -518,6 +518,11 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 	bool ext_texture_webp = false;
 	bool ext_splatting = false;
 	bool ext_quantization = false;
+	bool ext_animation_pointer = false;
+
+	for (size_t i = 0; i < animations.size(); ++i)
+		for (size_t j = 0; j < animations[i].tracks.size(); ++j)
+			ext_animation_pointer |= !animations[i].tracks[j].pointer.empty();
 
 	size_t accr_offset = 0;
 	size_t node_offset = 0;
@@ -797,6 +802,10 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 
 	remapNodes(data, nodes, node_offset);
 
+	// KHR_animation_pointer targets must survive optimization; material indices are finalized above so validate and reject output on failure
+	if (const char* pointer_error = validateAnimationPointers(animations, materials))
+		return pointer_error;
+
 	for (size_t i = 0; i < data->nodes_count; ++i)
 	{
 		NodeInfo& ni = nodes[i];
@@ -841,7 +850,7 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 	{
 		const Animation& animation = animations[i];
 
-		writeAnimation(json_animations, views, json_accessors, accr_offset, animation, i, data, nodes, settings);
+		writeAnimation(json_animations, views, json_accessors, accr_offset, animation, i, data, nodes, materials, settings);
 	}
 
 	for (size_t i = 0; i < data->cameras_count; ++i)
@@ -912,6 +921,7 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 	    {"KHR_lights_punctual", data->lights_count > 0, false},
 	    {"KHR_texture_basisu", (!json_textures.empty() && settings.texture_ktx2) || ext_texture_basisu, true},
 	    {"KHR_gaussian_splatting", ext_splatting, true},
+	    {"KHR_animation_pointer", ext_animation_pointer, false},
 	    {"EXT_texture_webp", (!json_textures.empty() && settings.texture_webp) || ext_texture_webp, true},
 	    {"EXT_mesh_gpu_instancing", ext_instancing, true},
 	};
@@ -927,7 +937,7 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 	writeExtensions(json, extensions, sizeof(extensions) / sizeof(extensions[0]));
 
 	// buffers[] array to be inserted by the caller
-	size_t bufferspec_pos = json.size();
+	bufferspec_pos = json.size();
 
 	std::string json_views;
 	finalizeBufferViews(json_views, views, bin, settings.fallback ? &fallback : NULL, fallback_size, meshopt_ext, settings.compresskhr ? (settings.compressmore ? 3 : 2) : 0);
@@ -996,7 +1006,7 @@ static size_t process(cgltf_data* data, const char* input_path, const char* outp
 		}
 	}
 
-	return bufferspec_pos;
+	return NULL;
 }
 
 static void writeU32(FILE* out, uint32_t data)
@@ -1181,10 +1191,18 @@ int gltfpack(const char* input, const char* output, const char* report, Settings
 
 	std::string json, bin, fallback;
 	size_t fallback_size = 0;
+	size_t bufferspec_pos = 0;
 
 	json += '{';
-	size_t bufferspec_pos = process(data, input, output, report, meshes, animations, settings, json, bin, fallback, fallback_size, meshopt_ext);
+	const char* process_error = process(data, input, output, report, meshes, animations, settings, json, bin, fallback, fallback_size, meshopt_ext, bufferspec_pos);
 	json += '}';
+
+	if (process_error)
+	{
+		cgltf_free(data);
+		fprintf(stderr, "Error: %s\n", process_error);
+		return 5;
+	}
 
 	cgltf_free(data);
 
@@ -1917,7 +1935,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* buffer, size_t size)
 
 	std::string json, bin, fallback;
 	size_t fallback_size = 0;
-	process(data, NULL, NULL, NULL, meshes, animations, settings, json, bin, fallback, fallback_size, "KHR_meshopt_compression");
+	size_t bufferspec_pos = 0;
+	process(data, NULL, NULL, NULL, meshes, animations, settings, json, bin, fallback, fallback_size, "KHR_meshopt_compression", bufferspec_pos);
 
 	cgltf_free(data);
 

@@ -1539,13 +1539,20 @@ void writeNode(std::string& json, const cgltf_node& node, const std::vector<Node
 	}
 }
 
-void writeAnimation(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Animation& animation, size_t i, cgltf_data* data, const std::vector<NodeInfo>& nodes, const Settings& settings)
+void writeAnimation(std::string& json, std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, const Animation& animation, size_t i, cgltf_data* data, const std::vector<NodeInfo>& nodes, const std::vector<MaterialInfo>& materials, const Settings& settings)
 {
 	std::vector<const Track*> tracks;
 
 	for (size_t j = 0; j < animation.tracks.size(); ++j)
 	{
 		const Track& track = animation.tracks[j];
+
+		// KHR_animation_pointer tracks are always kept; their target liveness is validated separately
+		if (!track.node)
+		{
+			tracks.push_back(&track);
+			continue;
+		}
 
 		const NodeInfo& ni = nodes[track.node - data->nodes];
 
@@ -1625,7 +1632,10 @@ void writeAnimation(std::string& json, std::vector<BufferView>& views, std::stri
 		}
 
 		std::string scratch;
-		StreamFormat format = writeKeyframeStream(scratch, track.path, track.data, settings, track.interpolation == cgltf_interpolation_type_cubic_spline);
+		bool pointer = !track.node && !track.pointer.empty();
+
+		StreamFormat format = pointer ? writeKeyframePointerStream(scratch, track.components, track.data, settings)
+		                              : writeKeyframeStream(scratch, track.path, track.data, settings, track.interpolation == cgltf_interpolation_type_cubic_spline);
 
 		if (range)
 		{
@@ -1633,14 +1643,18 @@ void writeAnimation(std::string& json, std::vector<BufferView>& views, std::stri
 			scratch += scratch;
 		}
 
-		BufferView::Compression compression = settings.compress && track.path != cgltf_animation_path_type_weights ? BufferView::Compression_Attribute : BufferView::Compression_None;
+		BufferView::Compression compression = (!pointer && settings.compress && track.path != cgltf_animation_path_type_weights) ? BufferView::Compression_Attribute : BufferView::Compression_None;
 
-		size_t view = getBufferView(views, BufferView::Kind_Keyframe, format.filter, compression, format.stride, track.path);
+		// pointer tracks have independently resampled frame counts, so they must never share a buffer view with each other;
+		// a negative variant forces getBufferView to allocate a fresh view while keeping regular keyframe packing unchanged
+		int view_variant = pointer ? -1 : track.path;
+		size_t view = getBufferView(views, BufferView::Kind_Keyframe, format.filter, compression, format.stride, view_variant);
 		size_t offset = views[view].data.size();
 		views[view].data += scratch;
 
 		comma(json_accessors);
-		writeAccessor(json_accessors, view, offset, format.type, format.component_type, format.normalized, track.data.size() * range_size);
+		size_t accessor_count = pointer ? track.data.size() / track.components : track.data.size() * range_size;
+		writeAccessor(json_accessors, view, offset, format.type, format.component_type, format.normalized, accessor_count);
 
 		size_t data_accr = accr_offset++;
 
@@ -1657,21 +1671,33 @@ void writeAnimation(std::string& json, std::vector<BufferView>& views, std::stri
 		}
 		append(json_samplers, "}");
 
-		const NodeInfo& tni = nodes[track.node - data->nodes];
-		size_t target_node = size_t(tni.remap);
-
-		// when animating morph weights, quantization may move mesh assignments to a mesh node in which case we need to move the animation output
-		if (track.path == cgltf_animation_path_type_weights && tni.mesh_nodes.size() == 1)
-			target_node = tni.mesh_nodes[0];
-
 		comma(json_channels);
 		append(json_channels, "{\"sampler\":");
 		append(json_channels, track_offset);
-		append(json_channels, ",\"target\":{\"node\":");
-		append(json_channels, target_node);
-		append(json_channels, ",\"path\":\"");
-		append(json_channels, animationPath(track.path));
-		append(json_channels, "\"}}");
+
+		if (pointer)
+		{
+			std::string uri = rewriteAnimationPointer(track.target, materials);
+
+			append(json_channels, ",\"target\":{\"extensions\":{\"KHR_animation_pointer\":{\"uri\":\"");
+			appendJson(json_channels, uri.c_str());
+			append(json_channels, "\"}}}}");
+		}
+		else
+		{
+			const NodeInfo& tni = nodes[track.node - data->nodes];
+			size_t target_node = size_t(tni.remap);
+
+			// when animating morph weights, quantization may move mesh assignments to a mesh node in which case we need to move the animation output
+			if (track.path == cgltf_animation_path_type_weights && tni.mesh_nodes.size() == 1)
+				target_node = tni.mesh_nodes[0];
+
+			append(json_channels, ",\"target\":{\"node\":");
+			append(json_channels, target_node);
+			append(json_channels, ",\"path\":\"");
+			append(json_channels, animationPath(track.path));
+			append(json_channels, "\"}}");
+		}
 
 		track_offset++;
 	}

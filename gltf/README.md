@@ -67,6 +67,7 @@ The following settings are frequently used to restrict some optimizations:
 
 gltfpack supports most Khronos extensions and some multi-vendor extensions in the input scenes, with newer extensions added regularly. The following extensions are fully supported:
 
+- KHR_animation_pointer (material PBR factors, KHR_texture_transform and KHR_lights_punctual light properties; unsupported or unresolvable pointers are rejected instead of being dropped)
 - KHR_lights_punctual
 - KHR_materials_anisotropy
 - KHR_materials_clearcoat
